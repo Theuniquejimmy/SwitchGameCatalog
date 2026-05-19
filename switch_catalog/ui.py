@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import sqlite3
 import json
+from pathlib import Path
 
 from PySide6.QtCore import Qt, QSize, QUrl
 from PySide6.QtGui import QBrush, QColor, QIcon, QPainter, QPen, QPixmap
@@ -873,7 +874,7 @@ class MainWindow(QMainWindow):
             recursive=self.settings.scan_recursively,
             threshold=self.settings.fuzzy_match_threshold,
         )
-        self.versions = load_versions()
+        self.versions = load_versions(refresh=True)
         self.refresh_games()
         self.refresh_grid()
         self.refresh_unmatched()
