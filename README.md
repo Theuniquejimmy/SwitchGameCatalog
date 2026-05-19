@@ -2,22 +2,17 @@
 
 A local Windows desktop catalog for personal Nintendo Switch game files. It scans user-selected `.nsp` and `.xci` folders, stores records in SQLite, matches update files from a separate updates folder, and displays the collection in a two-pane library interface.
 
-The app treats files as normal local files. It does not unpack, decrypt, patch, modify, download, or bypass anything.
-
 ## Features
 
 - Recursive base-game scan for `.nsp` and `.xci`
 - Separate recursive updates-folder scan
-- Filename cleaning and version detection
 - Fuzzy update-to-game matching
 - SQLite catalog at `~/.switch_library_catalog/library.sqlite3`
 - Settings stored at `~/.switch_library_catalog/settings.json`
-- Two-pane PySide6 UI with starts-with search, genre filter, and needs-review metadata filter
 - Cover grid view with adjustable art size and double-click navigation back to the library/details view
 - Favorites with a heart in the list and a highlighted frame in grid view
 - Right-click option to move a mistaken game entry into Unmatched Updates for DLC/update matching
 - Larger screenshot browser with Previous/Next controls
-- Bundled app icon
 - Unmatched updates view
 - Optional IGDB metadata lookup for real cover art
 - Manual metadata rematching from the game list right-click menu
@@ -54,3 +49,4 @@ switch_catalog/
   settings.py
   ui.py
 ```
+**or just run the exe!**
