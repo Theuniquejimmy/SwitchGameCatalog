@@ -29,6 +29,8 @@ python -m venv .venv
 .\.venv\Scripts\Activate.ps1
 pip install -r requirements.txt
 python main.py
+
+**or just run the exe**
 ```
 
 Open **Settings**, choose a base games folder and updates folder, then run **Rescan**.
@@ -49,4 +51,3 @@ switch_catalog/
   settings.py
   ui.py
 ```
-**or just run the exe!**
