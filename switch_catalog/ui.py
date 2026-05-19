@@ -2,7 +2,6 @@ from __future__ import annotations
 
 import sqlite3
 import json
-from pathlib import Path
 
 from PySide6.QtCore import Qt, QSize, QUrl
 from PySide6.QtGui import QBrush, QColor, QIcon, QPainter, QPen, QPixmap
@@ -37,6 +36,7 @@ from .db import row_to_dict
 from .file_ops import delete_file_if_present, move_file_to_folder
 from .filename import detect_version
 from .metadata import apply_metadata_result, fetch_and_apply_metadata, provider_from_settings
+from .paths import BUNDLED_ICON_PATH
 from .scanner import scan_library
 from .settings import AppSettings, normalize_folder, save_settings
 from .versions import load_versions, update_status
@@ -54,9 +54,7 @@ class MainWindow(QMainWindow):
         self.versions = load_versions()
 
         self.setWindowTitle("Switch Game Catalog")
-        icon_path = "E:/Downloads/switch game catalog.png"
-        if Path(icon_path).exists():
-            self.setWindowIcon(QIcon(icon_path))
+        self.setWindowIcon(QIcon(str(BUNDLED_ICON_PATH)))
         self.resize(1180, 760)
         self._build_ui()
         self.refresh_games()

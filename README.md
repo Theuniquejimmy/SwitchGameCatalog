@@ -17,7 +17,7 @@ The app treats files as normal local files. It does not unpack, decrypt, patch, 
 - Favorites with a heart in the list and a highlighted frame in grid view
 - Right-click option to move a mistaken game entry into Unmatched Updates for DLC/update matching
 - Larger screenshot browser with Previous/Next controls
-- Custom app icon support using `E:\Downloads\switch game catalog.png` when present
+- Bundled app icon
 - Unmatched updates view
 - Optional IGDB metadata lookup for real cover art
 - Manual metadata rematching from the game list right-click menu

@@ -3,12 +3,14 @@ from __future__ import annotations
 from pathlib import Path
 
 
+PACKAGE_DIR = Path(__file__).resolve().parent
 APP_DIR = Path.home() / ".switch_library_catalog"
 DB_PATH = APP_DIR / "library.sqlite3"
 SETTINGS_PATH = APP_DIR / "settings.json"
 IMAGE_CACHE_DIR = APP_DIR / "images"
 VERSIONS_CACHE_PATH = APP_DIR / "versions.json"
 VERSIONS_TXT_CACHE_PATH = APP_DIR / "versions.txt"
+BUNDLED_ICON_PATH = PACKAGE_DIR / "assets" / "switch_game_catalog.png"
 
 
 def ensure_app_dirs() -> None:
