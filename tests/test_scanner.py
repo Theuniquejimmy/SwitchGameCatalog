@@ -47,3 +47,22 @@ def test_scan_does_not_readd_file_already_marked_as_update(tmp_path):
 
     assert summary.base_files == 0
     assert conn.execute("SELECT COUNT(*) FROM games").fetchone()[0] == 0
+
+
+def test_scan_catalogs_nsz_files(tmp_path):
+    base = tmp_path / "base"
+    updates = tmp_path / "updates"
+    base.mkdir()
+    updates.mkdir()
+    file_path = base / "Compressed Game [0100000000000000][v0].nsz"
+    file_path.write_bytes(b"base")
+    conn = sqlite3.connect(":memory:")
+    conn.row_factory = sqlite3.Row
+    init_db(conn)
+
+    summary = scan_library(conn, str(base), str(updates))
+
+    row = conn.execute("SELECT file_name, file_extension FROM game_files").fetchone()
+    assert summary.base_files == 1
+    assert row["file_name"] == file_path.name
+    assert row["file_extension"] == ".nsz"

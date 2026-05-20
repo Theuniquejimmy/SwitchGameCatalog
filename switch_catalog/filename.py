@@ -3,7 +3,7 @@ from __future__ import annotations
 import re
 from pathlib import Path
 
-SUPPORTED_EXTENSIONS = {".nsp", ".xci"}
+SUPPORTED_EXTENSIONS = {".nsp", ".nsz", ".xci"}
 
 REGION_WORDS = {
     "usa",

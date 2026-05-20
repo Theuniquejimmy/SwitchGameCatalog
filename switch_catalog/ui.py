@@ -2,8 +2,9 @@ from __future__ import annotations
 
 import sqlite3
 import json
+from pathlib import Path
 
-from PySide6.QtCore import Qt, QSize, QUrl
+from PySide6.QtCore import QObject, Qt, QThread, QSize, QUrl, Signal
 from PySide6.QtGui import QBrush, QColor, QIcon, QPainter, QPen, QPixmap
 from PySide6.QtNetwork import QNetworkAccessManager, QNetworkRequest
 from PySide6.QtWidgets import (
@@ -33,13 +34,51 @@ from PySide6.QtWidgets import (
 )
 
 from .db import row_to_dict
-from .file_ops import delete_file_if_present, move_file_to_folder
+from .file_ops import (
+    browse_shell_folder,
+    delete_file_if_present,
+    move_files_to_folder,
+    moved_file_modified_time,
+)
 from .filename import detect_version
 from .metadata import apply_metadata_result, fetch_and_apply_metadata, provider_from_settings
 from .paths import BUNDLED_ICON_PATH
 from .scanner import scan_library
 from .settings import AppSettings, normalize_folder, save_settings
 from .versions import load_versions, update_status
+
+
+class InstallWorker(QObject):
+    finished = Signal(list)
+    failed = Signal(str)
+
+    def __init__(self, operations: list[dict[str, object]], install_folder: str) -> None:
+        super().__init__()
+        self.operations = operations
+        self.install_folder = install_folder
+
+    def run(self) -> None:
+        results = []
+        try:
+            destinations = move_files_to_folder(
+                [str(operation["source"]) for operation in self.operations],
+                self.install_folder,
+            )
+            for operation, destination in zip(self.operations, destinations):
+                results.append(
+                    {
+                        "kind": operation["kind"],
+                        "id": int(operation["id"]),
+                        "path": str(destination),
+                        "name": destination.name,
+                        "suffix": destination.suffix.lower(),
+                        "modified_time": moved_file_modified_time(destination),
+                    }
+                )
+        except Exception as exc:
+            self.failed.emit(str(exc))
+            return
+        self.finished.emit(results)
 
 
 class MainWindow(QMainWindow):
@@ -52,6 +91,10 @@ class MainWindow(QMainWindow):
         self.pixmap_cache: dict[str, QPixmap] = {}
         self.context_highlighted_item: QListWidgetItem | None = None
         self.versions = load_versions()
+        self.install_thread: QThread | None = None
+        self.install_worker: InstallWorker | None = None
+        self.install_progress: QProgressDialog | None = None
+        self.pending_install_context: dict[str, object] | None = None
 
         self.setWindowTitle("Switch Game Catalog")
         self.setWindowIcon(QIcon(str(BUNDLED_ICON_PATH)))
@@ -448,13 +491,12 @@ class MainWindow(QMainWindow):
 
         self.updates.clear()
         update_rows = self.conn.execute(
-            "SELECT id, file_path, file_name, detected_version, match_confidence FROM updates WHERE game_id=? ORDER BY file_name",
+            "SELECT id, file_path, file_name, detected_version FROM updates WHERE game_id=? ORDER BY file_name",
             (game_id,),
         ).fetchall()
         for update in update_rows:
             version = f" v{update['detected_version']}" if update["detected_version"] else ""
-            confidence = f" ({update['match_confidence']:.0%})"
-            item = QListWidgetItem(f"{update['file_name']}{version}{confidence}")
+            item = QListWidgetItem(f"{update['file_name']}{version}")
             item.setData(Qt.UserRole, update["id"])
             self.updates.addItem(item)
         status, newer_versions = update_status(
@@ -603,43 +645,22 @@ class MainWindow(QMainWindow):
         )
         if QMessageBox.question(self, "Install files", message) != QMessageBox.Yes:
             return
-        moved = 0
-        try:
-            base_destination = move_file_to_folder(base_row["file_path"], self.settings.install_folder)
-            self.conn.execute(
-                """
-                UPDATE game_files
-                SET file_path=?, file_name=?, file_extension=?, modified_time=?
-                WHERE id=?
-                """,
-                (
-                    str(base_destination),
-                    base_destination.name,
-                    base_destination.suffix.lower(),
-                    base_destination.stat().st_mtime,
-                    int(base_row["id"]),
-                ),
-            )
-            moved += 1
-            for update in update_rows:
-                destination = move_file_to_folder(update["file_path"], self.settings.install_folder)
-                self.conn.execute(
-                    """
-                    UPDATE updates
-                    SET file_path=?, file_name=?, modified_time=?
-                    WHERE id=?
-                    """,
-                    (str(destination), destination.name, destination.stat().st_mtime, int(update["id"])),
-                )
-                moved += 1
-            self.conn.commit()
-        except Exception as exc:
-            self.conn.rollback()
-            QMessageBox.warning(self, "Install failed", str(exc))
-            return
-        self.load_game(self.current_game_id)
-        self.refresh_games()
-        QMessageBox.information(self, "Install complete", f"Moved {moved} file(s).")
+        operations = [
+            {"kind": "base", "id": int(base_row["id"]), "source": base_row["file_path"]},
+            *[
+                {"kind": "update", "id": int(update["id"]), "source": update["file_path"]}
+                for update in update_rows
+            ],
+        ]
+        self.start_install_operations(
+            operations,
+            {
+                "game_id": self.current_game_id,
+                "refresh_games": True,
+                "refresh_unmatched": False,
+                "complete_message": f"Moved {len(operations)} file(s).",
+            },
+        )
 
     def install_selected_updates_only(self) -> None:
         if not self.settings.install_folder:
@@ -662,28 +683,107 @@ class MainWindow(QMainWindow):
             f"Move {len(rows)} selected update/DLC file(s) into:\n{self.settings.install_folder}",
         ) != QMessageBox.Yes:
             return
-        moved = 0
+        operations = [
+            {"kind": "update", "id": int(row["id"]), "source": row["file_path"]}
+            for row in rows
+        ]
+        self.start_install_operations(
+            operations,
+            {
+                "game_id": self.current_game_id,
+                "refresh_games": False,
+                "refresh_unmatched": True,
+                "complete_message": f"Moved {len(operations)} update/DLC file(s).",
+            },
+        )
+
+    def start_install_operations(self, operations: list[dict[str, object]], context: dict[str, object]) -> None:
+        if self.install_thread is not None:
+            QMessageBox.information(self, "Install", "An install is already running.")
+            return
+        self.pending_install_context = context
+        self.install_progress = QProgressDialog("Copying files to install folder...", None, 0, 0, self)
+        self.install_progress.setWindowTitle("Installing")
+        self.install_progress.setWindowModality(Qt.WindowModal)
+        self.install_progress.setMinimumDuration(0)
+        self.install_progress.setCancelButton(None)
+        self.install_progress.show()
+
+        self.install_thread = QThread(self)
+        self.install_worker = InstallWorker(operations, self.settings.install_folder)
+        self.install_worker.moveToThread(self.install_thread)
+        self.install_thread.started.connect(self.install_worker.run)
+        self.install_worker.finished.connect(self.finish_install_operations)
+        self.install_worker.failed.connect(self.fail_install_operations)
+        self.install_worker.finished.connect(self.install_thread.quit)
+        self.install_worker.failed.connect(self.install_thread.quit)
+        self.install_thread.finished.connect(self.install_worker.deleteLater)
+        self.install_thread.finished.connect(self.clear_install_worker)
+        self.install_thread.start()
+
+    def finish_install_operations(self, results: list[dict[str, object]]) -> None:
+        context = self.pending_install_context or {}
         try:
-            for row in rows:
-                destination = move_file_to_folder(row["file_path"], self.settings.install_folder)
-                self.conn.execute(
-                    """
-                    UPDATE updates
-                    SET file_path=?, file_name=?, modified_time=?
-                    WHERE id=?
-                    """,
-                    (str(destination), destination.name, destination.stat().st_mtime, int(row["id"])),
-                )
-                moved += 1
+            for result in results:
+                if result["kind"] == "base":
+                    self.conn.execute(
+                        """
+                        UPDATE game_files
+                        SET file_path=?, file_name=?, file_extension=?, modified_time=?
+                        WHERE id=?
+                        """,
+                        (
+                            result["path"],
+                            result["name"],
+                            result["suffix"],
+                            result["modified_time"],
+                            result["id"],
+                        ),
+                    )
+                else:
+                    self.conn.execute(
+                        """
+                        UPDATE updates
+                        SET file_path=?, file_name=?, modified_time=?
+                        WHERE id=?
+                        """,
+                        (result["path"], result["name"], result["modified_time"], result["id"]),
+                    )
             self.conn.commit()
         except Exception as exc:
             self.conn.rollback()
-            QMessageBox.warning(self, "Install failed", str(exc))
+            self.show_install_failed(exc)
             return
-        if self.current_game_id:
-            self.load_game(self.current_game_id)
-        self.refresh_unmatched()
-        QMessageBox.information(self, "Install complete", f"Moved {moved} update/DLC file(s).")
+        game_id = context.get("game_id")
+        if game_id:
+            self.load_game(int(game_id))
+        if context.get("refresh_games"):
+            self.refresh_games()
+        if context.get("refresh_unmatched"):
+            self.refresh_unmatched()
+        QMessageBox.information(self, "Install complete", str(context.get("complete_message") or "Install complete."))
+
+    def fail_install_operations(self, message: str) -> None:
+        self.show_install_failed(RuntimeError(message))
+
+    def clear_install_worker(self) -> None:
+        if self.install_progress is not None:
+            self.install_progress.close()
+        if self.install_thread is not None:
+            self.install_thread.deleteLater()
+        self.install_thread = None
+        self.install_worker = None
+        self.install_progress = None
+        self.pending_install_context = None
+
+    def show_install_failed(self, exc: Exception) -> None:
+        QMessageBox.warning(
+            self,
+            "Install failed",
+            f"{exc}\n\n"
+            "For a Switch or portable device, reconnect it and choose Settings > Install folder > Browse Device. "
+            "For SD cards and local folders, choose a normal drive-letter path with Browse.",
+        )
 
     def delete_selected_updates(self) -> None:
         update_ids = self.selected_update_ids()
@@ -873,7 +973,7 @@ class MainWindow(QMainWindow):
             recursive=self.settings.scan_recursively,
             threshold=self.settings.fuzzy_match_threshold,
         )
-        self.versions = load_versions()
+        self.versions = load_versions(refresh=True)
         self.refresh_games()
         self.refresh_grid()
         self.refresh_unmatched()
@@ -1204,7 +1304,11 @@ class SettingsDialog(QDialog):
         layout = QFormLayout(self)
         self.base = _folder_field(settings.base_games_folder)
         self.updates = _folder_field(settings.updates_folder)
-        self.install = _folder_field(settings.install_folder)
+        self.install = _folder_field(
+            settings.install_folder,
+            "Example: E:\\Games, C:\\SwitchInstallStaging, or Browse Device",
+            allow_shell=True,
+        )
         self.provider = QComboBox()
         self.provider.addItems(["igdb"])
         self.provider.setCurrentText(settings.metadata_provider)
@@ -1218,6 +1322,11 @@ class SettingsDialog(QDialog):
         layout.addRow("Base games folder", self.base)
         layout.addRow("Updates folder", self.updates)
         layout.addRow("Install folder", self.install)
+        install_hint = QLabel(
+            "Use Browse for normal folders, or Browse Device for a Switch/portable device shown under This PC."
+        )
+        install_hint.setWordWrap(True)
+        layout.addRow("", install_hint)
         layout.addRow("Metadata provider", self.provider)
         layout.addRow("IGDB client ID", self.igdb_client_id)
         layout.addRow("IGDB client secret", self.igdb_client_secret)
@@ -1244,11 +1353,13 @@ class SettingsDialog(QDialog):
         super().accept()
 
 
-def _folder_field(value: str) -> QWidget:
+def _folder_field(value: str, placeholder: str = "", *, allow_shell: bool = False) -> QWidget:
     wrapper = QWidget()
     layout = QHBoxLayout(wrapper)
     layout.setContentsMargins(0, 0, 0, 0)
     line = QLineEdit(value)
+    if placeholder:
+        line.setPlaceholderText(placeholder)
     browse = QPushButton("Browse")
 
     def choose() -> None:
@@ -1259,6 +1370,20 @@ def _folder_field(value: str) -> QWidget:
     browse.clicked.connect(choose)
     layout.addWidget(line, 1)
     layout.addWidget(browse)
+    if allow_shell:
+        browse_device = QPushButton("Browse Device")
+
+        def choose_device() -> None:
+            try:
+                folder = browse_shell_folder()
+            except Exception as exc:
+                QMessageBox.warning(wrapper, "Choose device folder", str(exc))
+                return
+            if folder:
+                line.setText(folder)
+
+        browse_device.clicked.connect(choose_device)
+        layout.addWidget(browse_device)
     wrapper.text = line.text  # type: ignore[attr-defined]
     return wrapper
 

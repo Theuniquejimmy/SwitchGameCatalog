@@ -43,4 +43,6 @@ def save_settings(settings: AppSettings) -> None:
 def normalize_folder(value: str) -> str:
     if not value:
         return ""
+    if value.startswith("shell:"):
+        return value
     return str(Path(value).expanduser())
