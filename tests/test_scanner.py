@@ -66,3 +66,28 @@ def test_scan_catalogs_nsz_files(tmp_path):
     assert summary.base_files == 1
     assert row["file_name"] == file_path.name
     assert row["file_extension"] == ".nsz"
+
+
+def test_scan_mixed_folder_keeps_nsz_base_and_matches_update(tmp_path):
+    folder = tmp_path / "mixed"
+    folder.mkdir()
+    base_file = folder / "Bloomtown [0100AF401C8E4000][v0].nsz"
+    update_file = folder / "Bloomtown Update [0100AF401C8E4800][v6].nsp"
+    base_file.write_bytes(b"base")
+    update_file.write_bytes(b"update")
+    conn = sqlite3.connect(":memory:")
+    conn.row_factory = sqlite3.Row
+    init_db(conn)
+
+    summary = scan_library(conn, str(folder), str(folder))
+
+    base_row = conn.execute("SELECT file_name, file_extension FROM game_files").fetchone()
+    update_row = conn.execute("SELECT u.file_name, u.game_id FROM updates u").fetchone()
+    game_id = conn.execute("SELECT id FROM games").fetchone()["id"]
+    assert summary.base_files == 1
+    assert summary.update_files == 1
+    assert summary.matched_updates == 1
+    assert base_row["file_name"] == base_file.name
+    assert base_row["file_extension"] == ".nsz"
+    assert update_row["file_name"] == update_file.name
+    assert update_row["game_id"] == game_id
