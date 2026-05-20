@@ -7,7 +7,7 @@ A local Windows desktop catalog for personal Nintendo Switch game files. It scan
 
 ## Features
 
-- Recursive base-game scan for `.nsp` and `.xci`
+- Recursive base-game scan for `.nsp .nsz,` and `.xci`
 - Separate recursive updates-folder scan
 - Fuzzy update-to-game matching
 - SQLite catalog at `~/.switch_library_catalog/library.sqlite3`
