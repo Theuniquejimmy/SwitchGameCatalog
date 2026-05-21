@@ -17,6 +17,7 @@ class AppSettings:
     igdb_client_secret: str = ""
     scan_recursively: bool = True
     auto_rescan_on_startup: bool = False
+    auto_check_updates_on_startup: bool = True
     cache_images: bool = True
     fuzzy_match_threshold: float = 0.82
 
@@ -43,6 +44,4 @@ def save_settings(settings: AppSettings) -> None:
 def normalize_folder(value: str) -> str:
     if not value:
         return ""
-    if value.startswith("shell:"):
-        return value
     return str(Path(value).expanduser())

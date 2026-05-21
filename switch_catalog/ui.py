@@ -4,8 +4,9 @@ import sqlite3
 import json
 from pathlib import Path
 
-from PySide6.QtCore import QObject, Qt, QThread, QSize, QUrl, Signal
-from PySide6.QtGui import QBrush, QColor, QIcon, QPainter, QPen, QPixmap
+from . import __version__
+from PySide6.QtCore import Qt, QSize, QTimer, QUrl
+from PySide6.QtGui import QBrush, QColor, QDesktopServices, QIcon, QPainter, QPen, QPixmap
 from PySide6.QtNetwork import QNetworkAccessManager, QNetworkRequest
 from PySide6.QtWidgets import (
     QAbstractItemView,
@@ -33,52 +34,15 @@ from PySide6.QtWidgets import (
     QWidget,
 )
 
+from .app_updates import RELEASES_PAGE_URL, check_latest_release
 from .db import row_to_dict
-from .file_ops import (
-    browse_shell_folder,
-    delete_file_if_present,
-    move_files_to_folder,
-    moved_file_modified_time,
-)
+from .file_ops import delete_file_if_present, move_file_to_folder
 from .filename import detect_version
 from .metadata import apply_metadata_result, fetch_and_apply_metadata, provider_from_settings
 from .paths import BUNDLED_ICON_PATH
 from .scanner import scan_library
 from .settings import AppSettings, normalize_folder, save_settings
 from .versions import load_versions, update_status
-
-
-class InstallWorker(QObject):
-    finished = Signal(list)
-    failed = Signal(str)
-
-    def __init__(self, operations: list[dict[str, object]], install_folder: str) -> None:
-        super().__init__()
-        self.operations = operations
-        self.install_folder = install_folder
-
-    def run(self) -> None:
-        results = []
-        try:
-            destinations = move_files_to_folder(
-                [str(operation["source"]) for operation in self.operations],
-                self.install_folder,
-            )
-            for operation, destination in zip(self.operations, destinations):
-                results.append(
-                    {
-                        "kind": operation["kind"],
-                        "id": int(operation["id"]),
-                        "path": str(destination),
-                        "name": destination.name,
-                        "suffix": destination.suffix.lower(),
-                        "modified_time": moved_file_modified_time(destination),
-                    }
-                )
-        except Exception as exc:
-            self.failed.emit(str(exc))
-            return
-        self.finished.emit(results)
 
 
 class MainWindow(QMainWindow):
@@ -91,10 +55,6 @@ class MainWindow(QMainWindow):
         self.pixmap_cache: dict[str, QPixmap] = {}
         self.context_highlighted_item: QListWidgetItem | None = None
         self.versions = load_versions()
-        self.install_thread: QThread | None = None
-        self.install_worker: InstallWorker | None = None
-        self.install_progress: QProgressDialog | None = None
-        self.pending_install_context: dict[str, object] | None = None
 
         self.setWindowTitle("Switch Game Catalog")
         self.setWindowIcon(QIcon(str(BUNDLED_ICON_PATH)))
@@ -103,12 +63,22 @@ class MainWindow(QMainWindow):
         self.refresh_games()
         if self.settings.auto_rescan_on_startup and self.settings.base_games_folder:
             self.scan()
+        if self.settings.auto_check_updates_on_startup:
+            QTimer.singleShot(1000, lambda: self.check_for_app_updates(silent=True))
 
     def _build_ui(self) -> None:
         self.tabs = QTabWidget()
-        self.tabs.addTab(self._library_tab(), "Library")
-        self.tabs.addTab(self._grid_tab(), "Grid View")
-        self.tabs.addTab(self._unmatched_tab(), "Unmatched Updates")
+        self.tabs.setUsesScrollButtons(True)
+        self.tabs.setElideMode(Qt.ElideNone)
+        self.tabs.tabBar().setExpanding(False)
+        self.library_tab_widget = self._library_tab()
+        self.grid_tab_widget = self._grid_tab()
+        self.favorites_tab_widget = self._favorites_tab()
+        self.unmatched_tab_widget = self._unmatched_tab()
+        self.tabs.addTab(self.library_tab_widget, "Library")
+        self.tabs.addTab(self.grid_tab_widget, "Grid View")
+        self.tabs.addTab(self.favorites_tab_widget, "Favorites")
+        self.tabs.addTab(self.unmatched_tab_widget, "Unmatched Updates")
         self.setCentralWidget(self.tabs)
 
     def _library_tab(self) -> QWidget:
@@ -223,12 +193,7 @@ class MainWindow(QMainWindow):
         controls.addWidget(self.grid_size_label)
 
         self.grid_list = QListWidget()
-        self.grid_list.setViewMode(QListWidget.IconMode)
-        self.grid_list.setResizeMode(QListWidget.Adjust)
-        self.grid_list.setMovement(QListWidget.Static)
-        self.grid_list.setWordWrap(True)
-        self.grid_list.setSelectionMode(QAbstractItemView.SingleSelection)
-        self.grid_list.setContextMenuPolicy(Qt.CustomContextMenu)
+        self._configure_grid_list(self.grid_list)
         self.grid_list.itemDoubleClicked.connect(self.open_grid_game)
         self.grid_list.customContextMenuRequested.connect(self.open_grid_menu)
 
@@ -236,6 +201,27 @@ class MainWindow(QMainWindow):
         layout.addLayout(controls)
         self.refresh_grid()
         return widget
+
+    def _favorites_tab(self) -> QWidget:
+        widget = QWidget()
+        layout = QVBoxLayout(widget)
+        self.favorites_grid_list = QListWidget()
+        self._configure_grid_list(self.favorites_grid_list)
+        self.favorites_grid_list.itemDoubleClicked.connect(self.open_grid_game)
+        self.favorites_grid_list.customContextMenuRequested.connect(self.open_favorites_grid_menu)
+        layout.addWidget(self.favorites_grid_list, 1)
+        self.refresh_favorites_grid()
+        return widget
+
+    def _configure_grid_list(self, grid_list: QListWidget) -> None:
+        grid_list.setViewMode(QListWidget.IconMode)
+        grid_list.setResizeMode(QListWidget.Adjust)
+        grid_list.setMovement(QListWidget.Static)
+        grid_list.setWordWrap(True)
+        grid_list.setUniformItemSizes(True)
+        grid_list.setSpacing(10)
+        grid_list.setSelectionMode(QAbstractItemView.SingleSelection)
+        grid_list.setContextMenuPolicy(Qt.CustomContextMenu)
 
     def _unmatched_tab(self) -> QWidget:
         widget = QWidget()
@@ -298,35 +284,52 @@ class MainWindow(QMainWindow):
         if not hasattr(self, "grid_list"):
             return
         self.clear_context_highlight()
-        self.grid_list.clear()
-        for row in self.conn.execute(
-            """
+        self._refresh_grid_list(self.grid_list)
+        self.refresh_favorites_grid()
+        self.update_grid_item_size()
+
+    def refresh_favorites_grid(self) -> None:
+        if not hasattr(self, "favorites_grid_list"):
+            return
+        self._refresh_grid_list(self.favorites_grid_list, favorites_only=True)
+        self.update_grid_item_size()
+
+    def _refresh_grid_list(self, grid_list: QListWidget, *, favorites_only: bool = False) -> None:
+        grid_list.clear()
+        query = """
             SELECT id, display_title, cover_image_url, favorite
             FROM games
-            ORDER BY display_title COLLATE NOCASE
-            """
-        ):
+        """
+        if favorites_only:
+            query += " WHERE favorite=1"
+        query += " ORDER BY display_title COLLATE NOCASE"
+        for row in self.conn.execute(query):
             item = QListWidgetItem(row["display_title"])
             item.setData(Qt.UserRole, row["id"])
             cover_url = _higher_res_image_url(row["cover_image_url"] or "")
             item.setData(Qt.UserRole + 1, cover_url)
             item.setData(Qt.UserRole + 2, bool(row["favorite"]))
-            self.grid_list.addItem(item)
+            item.setSizeHint(self._grid_item_size())
+            grid_list.addItem(item)
             if cover_url:
                 self._load_list_icon(cover_url, item, self._grid_icon_size(), favorite=bool(row["favorite"]))
-        self.update_grid_item_size()
 
     def update_grid_item_size(self) -> None:
         if not hasattr(self, "grid_list"):
             return
         icon_size = self._grid_icon_size()
-        self.grid_list.setIconSize(icon_size)
-        self.grid_list.setGridSize(QSize(icon_size.width() + 42, icon_size.height() + 72))
-        for index in range(self.grid_list.count()):
-            item = self.grid_list.item(index)
-            url = item.data(Qt.UserRole + 1)
-            if url:
-                self._load_list_icon(str(url), item, icon_size, favorite=bool(item.data(Qt.UserRole + 2)))
+        for grid_list in (self.grid_list, getattr(self, "favorites_grid_list", None)):
+            if grid_list is None:
+                continue
+            grid_list.setIconSize(icon_size)
+            item_size = self._grid_item_size()
+            grid_list.setGridSize(item_size)
+            for index in range(grid_list.count()):
+                item = grid_list.item(index)
+                item.setSizeHint(item_size)
+                url = item.data(Qt.UserRole + 1)
+                if url:
+                    self._load_list_icon(str(url), item, icon_size, favorite=bool(item.data(Qt.UserRole + 2)))
         if hasattr(self, "grid_size_label"):
             self.grid_size_label.setText(f"{icon_size.width()} px")
 
@@ -334,16 +337,26 @@ class MainWindow(QMainWindow):
         width = self.grid_size.value() if hasattr(self, "grid_size") else 170
         return QSize(width, int(width * 1.45))
 
+    def _grid_item_size(self) -> QSize:
+        icon_size = self._grid_icon_size()
+        return QSize(icon_size.width() + 64, icon_size.height() + 98)
+
     def open_grid_game(self, item: QListWidgetItem) -> None:
         game_id = int(item.data(Qt.UserRole))
         self.show_game_in_library(game_id)
 
     def open_grid_menu(self, position) -> None:
-        item = self.grid_list.itemAt(position)
+        self._open_grid_menu(self.grid_list, position)
+
+    def open_favorites_grid_menu(self, position) -> None:
+        self._open_grid_menu(self.favorites_grid_list, position)
+
+    def _open_grid_menu(self, grid_list: QListWidget, position) -> None:
+        item = grid_list.itemAt(position)
         if item is None:
             return
-        self.grid_list.setFocus()
-        self.grid_list.setCurrentItem(item)
+        grid_list.setFocus()
+        grid_list.setCurrentItem(item)
         item.setSelected(True)
         self.mark_context_item(item)
         QApplication.processEvents()
@@ -353,7 +366,7 @@ class MainWindow(QMainWindow):
         open_action = menu.addAction("Open in library")
         favorite_action = menu.addAction("Remove favorite" if favorite else "Favorite game")
         mark_dlc_action = menu.addAction("Mark as DLC/update")
-        chosen = menu.exec(self.grid_list.mapToGlobal(position))
+        chosen = menu.exec(grid_list.mapToGlobal(position))
         if chosen == open_action:
             self.show_game_in_library(game_id)
         elif chosen == favorite_action:
@@ -379,7 +392,7 @@ class MainWindow(QMainWindow):
                 break
         self.load_game(game_id)
         if hasattr(self, "tabs"):
-            self.tabs.setCurrentIndex(0)
+            self.tabs.setCurrentWidget(self.library_tab_widget)
 
     def refresh_genres(self) -> None:
         if not hasattr(self, "genre_filter"):
@@ -491,12 +504,13 @@ class MainWindow(QMainWindow):
 
         self.updates.clear()
         update_rows = self.conn.execute(
-            "SELECT id, file_path, file_name, detected_version FROM updates WHERE game_id=? ORDER BY file_name",
+            "SELECT id, file_path, file_name, detected_version, match_confidence FROM updates WHERE game_id=? ORDER BY file_name",
             (game_id,),
         ).fetchall()
         for update in update_rows:
             version = f" v{update['detected_version']}" if update["detected_version"] else ""
-            item = QListWidgetItem(f"{update['file_name']}{version}")
+            confidence = f" ({update['match_confidence']:.0%})"
+            item = QListWidgetItem(f"{update['file_name']}{version}{confidence}")
             item.setData(Qt.UserRole, update["id"])
             self.updates.addItem(item)
         status, newer_versions = update_status(
@@ -574,7 +588,7 @@ class MainWindow(QMainWindow):
         reply.finished.connect(done)
 
     def _set_item_icon(self, item: QListWidgetItem, pixmap: QPixmap, size: QSize, *, favorite: bool = False) -> None:
-        scaled = pixmap.scaled(size, Qt.KeepAspectRatio, Qt.SmoothTransformation)
+        scaled = _fixed_size_pixmap(pixmap, size)
         if favorite:
             scaled = _favorite_pixmap(scaled)
         item.setIcon(QIcon(scaled))
@@ -645,22 +659,43 @@ class MainWindow(QMainWindow):
         )
         if QMessageBox.question(self, "Install files", message) != QMessageBox.Yes:
             return
-        operations = [
-            {"kind": "base", "id": int(base_row["id"]), "source": base_row["file_path"]},
-            *[
-                {"kind": "update", "id": int(update["id"]), "source": update["file_path"]}
-                for update in update_rows
-            ],
-        ]
-        self.start_install_operations(
-            operations,
-            {
-                "game_id": self.current_game_id,
-                "refresh_games": True,
-                "refresh_unmatched": False,
-                "complete_message": f"Moved {len(operations)} file(s).",
-            },
-        )
+        moved = 0
+        try:
+            base_destination = move_file_to_folder(base_row["file_path"], self.settings.install_folder)
+            self.conn.execute(
+                """
+                UPDATE game_files
+                SET file_path=?, file_name=?, file_extension=?, modified_time=?
+                WHERE id=?
+                """,
+                (
+                    str(base_destination),
+                    base_destination.name,
+                    base_destination.suffix.lower(),
+                    base_destination.stat().st_mtime,
+                    int(base_row["id"]),
+                ),
+            )
+            moved += 1
+            for update in update_rows:
+                destination = move_file_to_folder(update["file_path"], self.settings.install_folder)
+                self.conn.execute(
+                    """
+                    UPDATE updates
+                    SET file_path=?, file_name=?, modified_time=?
+                    WHERE id=?
+                    """,
+                    (str(destination), destination.name, destination.stat().st_mtime, int(update["id"])),
+                )
+                moved += 1
+            self.conn.commit()
+        except Exception as exc:
+            self.conn.rollback()
+            QMessageBox.warning(self, "Install failed", str(exc))
+            return
+        self.load_game(self.current_game_id)
+        self.refresh_games()
+        QMessageBox.information(self, "Install complete", f"Moved {moved} file(s).")
 
     def install_selected_updates_only(self) -> None:
         if not self.settings.install_folder:
@@ -683,107 +718,28 @@ class MainWindow(QMainWindow):
             f"Move {len(rows)} selected update/DLC file(s) into:\n{self.settings.install_folder}",
         ) != QMessageBox.Yes:
             return
-        operations = [
-            {"kind": "update", "id": int(row["id"]), "source": row["file_path"]}
-            for row in rows
-        ]
-        self.start_install_operations(
-            operations,
-            {
-                "game_id": self.current_game_id,
-                "refresh_games": False,
-                "refresh_unmatched": True,
-                "complete_message": f"Moved {len(operations)} update/DLC file(s).",
-            },
-        )
-
-    def start_install_operations(self, operations: list[dict[str, object]], context: dict[str, object]) -> None:
-        if self.install_thread is not None:
-            QMessageBox.information(self, "Install", "An install is already running.")
-            return
-        self.pending_install_context = context
-        self.install_progress = QProgressDialog("Copying files to install folder...", None, 0, 0, self)
-        self.install_progress.setWindowTitle("Installing")
-        self.install_progress.setWindowModality(Qt.WindowModal)
-        self.install_progress.setMinimumDuration(0)
-        self.install_progress.setCancelButton(None)
-        self.install_progress.show()
-
-        self.install_thread = QThread(self)
-        self.install_worker = InstallWorker(operations, self.settings.install_folder)
-        self.install_worker.moveToThread(self.install_thread)
-        self.install_thread.started.connect(self.install_worker.run)
-        self.install_worker.finished.connect(self.finish_install_operations)
-        self.install_worker.failed.connect(self.fail_install_operations)
-        self.install_worker.finished.connect(self.install_thread.quit)
-        self.install_worker.failed.connect(self.install_thread.quit)
-        self.install_thread.finished.connect(self.install_worker.deleteLater)
-        self.install_thread.finished.connect(self.clear_install_worker)
-        self.install_thread.start()
-
-    def finish_install_operations(self, results: list[dict[str, object]]) -> None:
-        context = self.pending_install_context or {}
+        moved = 0
         try:
-            for result in results:
-                if result["kind"] == "base":
-                    self.conn.execute(
-                        """
-                        UPDATE game_files
-                        SET file_path=?, file_name=?, file_extension=?, modified_time=?
-                        WHERE id=?
-                        """,
-                        (
-                            result["path"],
-                            result["name"],
-                            result["suffix"],
-                            result["modified_time"],
-                            result["id"],
-                        ),
-                    )
-                else:
-                    self.conn.execute(
-                        """
-                        UPDATE updates
-                        SET file_path=?, file_name=?, modified_time=?
-                        WHERE id=?
-                        """,
-                        (result["path"], result["name"], result["modified_time"], result["id"]),
-                    )
+            for row in rows:
+                destination = move_file_to_folder(row["file_path"], self.settings.install_folder)
+                self.conn.execute(
+                    """
+                    UPDATE updates
+                    SET file_path=?, file_name=?, modified_time=?
+                    WHERE id=?
+                    """,
+                    (str(destination), destination.name, destination.stat().st_mtime, int(row["id"])),
+                )
+                moved += 1
             self.conn.commit()
         except Exception as exc:
             self.conn.rollback()
-            self.show_install_failed(exc)
+            QMessageBox.warning(self, "Install failed", str(exc))
             return
-        game_id = context.get("game_id")
-        if game_id:
-            self.load_game(int(game_id))
-        if context.get("refresh_games"):
-            self.refresh_games()
-        if context.get("refresh_unmatched"):
-            self.refresh_unmatched()
-        QMessageBox.information(self, "Install complete", str(context.get("complete_message") or "Install complete."))
-
-    def fail_install_operations(self, message: str) -> None:
-        self.show_install_failed(RuntimeError(message))
-
-    def clear_install_worker(self) -> None:
-        if self.install_progress is not None:
-            self.install_progress.close()
-        if self.install_thread is not None:
-            self.install_thread.deleteLater()
-        self.install_thread = None
-        self.install_worker = None
-        self.install_progress = None
-        self.pending_install_context = None
-
-    def show_install_failed(self, exc: Exception) -> None:
-        QMessageBox.warning(
-            self,
-            "Install failed",
-            f"{exc}\n\n"
-            "For a Switch or portable device, reconnect it and choose Settings > Install folder > Browse Device. "
-            "For SD cards and local folders, choose a normal drive-letter path with Browse.",
-        )
+        if self.current_game_id:
+            self.load_game(self.current_game_id)
+        self.refresh_unmatched()
+        QMessageBox.information(self, "Install complete", f"Moved {moved} update/DLC file(s).")
 
     def delete_selected_updates(self) -> None:
         update_ids = self.selected_update_ids()
@@ -944,7 +900,7 @@ class MainWindow(QMainWindow):
         self.refresh_match_games()
         self.refresh_unmatched()
         if hasattr(self, "tabs"):
-            self.tabs.setCurrentIndex(2)
+            self.tabs.setCurrentWidget(self.unmatched_tab_widget)
 
     def mark_context_item(self, item: QListWidgetItem) -> None:
         self.clear_context_highlight(except_item=item)
@@ -973,7 +929,7 @@ class MainWindow(QMainWindow):
             recursive=self.settings.scan_recursively,
             threshold=self.settings.fuzzy_match_threshold,
         )
-        self.versions = load_versions(refresh=True)
+        self.versions = load_versions()
         self.refresh_games()
         self.refresh_grid()
         self.refresh_unmatched()
@@ -1088,6 +1044,34 @@ class MainWindow(QMainWindow):
             self.settings = dialog.settings
             save_settings(self.settings)
             self.refresh_match_games()
+
+    def check_for_app_updates(self, *, silent: bool = False) -> None:
+        try:
+            info = check_latest_release()
+        except Exception as exc:
+            if not silent:
+                QMessageBox.warning(self, "Update check failed", str(exc))
+            return
+        if info.update_available:
+            message = (
+                f"{info.release_name} is available.\n\n"
+                f"Installed: v{info.current_version}\n"
+                f"Latest: {info.latest_version}"
+            )
+            if QMessageBox.information(
+                self,
+                "Update available",
+                message,
+                QMessageBox.Open | QMessageBox.Close,
+                QMessageBox.Open,
+            ) == QMessageBox.Open:
+                QDesktopServices.openUrl(QUrl(info.release_url or RELEASES_PAGE_URL))
+        elif not silent:
+            QMessageBox.information(
+                self,
+                "No update available",
+                f"Switch Game Catalog is up to date.\n\nInstalled: v{info.current_version}",
+            )
 
     def refresh_unmatched(self) -> None:
         if not hasattr(self, "unmatched"):
@@ -1301,14 +1285,11 @@ class SettingsDialog(QDialog):
         super().__init__(parent)
         self.settings = settings
         self.setWindowTitle("Settings")
+        self.resize(680, 520)
         layout = QFormLayout(self)
         self.base = _folder_field(settings.base_games_folder)
         self.updates = _folder_field(settings.updates_folder)
-        self.install = _folder_field(
-            settings.install_folder,
-            "Example: E:\\Games, C:\\SwitchInstallStaging, or Browse Device",
-            allow_shell=True,
-        )
+        self.install = _folder_field(settings.install_folder)
         self.provider = QComboBox()
         self.provider.addItems(["igdb"])
         self.provider.setCurrentText(settings.metadata_provider)
@@ -1319,27 +1300,35 @@ class SettingsDialog(QDialog):
         self.recursive.setChecked(settings.scan_recursively)
         self.auto = QCheckBox()
         self.auto.setChecked(settings.auto_rescan_on_startup)
+        self.auto_check_updates = QCheckBox()
+        self.auto_check_updates.setChecked(settings.auto_check_updates_on_startup)
+        update_controls = QHBoxLayout()
+        check_updates = QPushButton("Check for Updates")
+        check_updates.clicked.connect(self.check_for_updates)
+        update_controls.addWidget(self.auto_check_updates)
+        update_controls.addWidget(check_updates)
+        update_controls.addStretch(1)
         layout.addRow("Base games folder", self.base)
         layout.addRow("Updates folder", self.updates)
         layout.addRow("Install folder", self.install)
-        install_hint = QLabel(
-            "Use Browse for normal folders, or Browse Device for a Switch/portable device shown under This PC."
-        )
-        install_hint.setWordWrap(True)
-        layout.addRow("", install_hint)
         layout.addRow("Metadata provider", self.provider)
         layout.addRow("IGDB client ID", self.igdb_client_id)
         layout.addRow("IGDB client secret", self.igdb_client_secret)
         layout.addRow("Scan recursively", self.recursive)
         layout.addRow("Auto-rescan on startup", self.auto)
+        layout.addRow("App updates", update_controls)
         actions = QHBoxLayout()
         save = QPushButton("Save")
         save.clicked.connect(self.accept)
         cancel = QPushButton("Cancel")
         cancel.clicked.connect(self.reject)
+        actions.addStretch(1)
         actions.addWidget(save)
         actions.addWidget(cancel)
         layout.addRow(actions)
+        version_label = QLabel(f"Switch Game Catalog v{__version__}")
+        version_label.setAlignment(Qt.AlignRight)
+        layout.addRow(version_label)
 
     def accept(self) -> None:
         self.settings.base_games_folder = normalize_folder(self.base.text())
@@ -1350,16 +1339,20 @@ class SettingsDialog(QDialog):
         self.settings.igdb_client_secret = self.igdb_client_secret.text().strip()
         self.settings.scan_recursively = self.recursive.isChecked()
         self.settings.auto_rescan_on_startup = self.auto.isChecked()
+        self.settings.auto_check_updates_on_startup = self.auto_check_updates.isChecked()
         super().accept()
 
+    def check_for_updates(self) -> None:
+        parent = self.parent()
+        if hasattr(parent, "check_for_app_updates"):
+            parent.check_for_app_updates(silent=False)
 
-def _folder_field(value: str, placeholder: str = "", *, allow_shell: bool = False) -> QWidget:
+
+def _folder_field(value: str) -> QWidget:
     wrapper = QWidget()
     layout = QHBoxLayout(wrapper)
     layout.setContentsMargins(0, 0, 0, 0)
     line = QLineEdit(value)
-    if placeholder:
-        line.setPlaceholderText(placeholder)
     browse = QPushButton("Browse")
 
     def choose() -> None:
@@ -1370,20 +1363,6 @@ def _folder_field(value: str, placeholder: str = "", *, allow_shell: bool = Fals
     browse.clicked.connect(choose)
     layout.addWidget(line, 1)
     layout.addWidget(browse)
-    if allow_shell:
-        browse_device = QPushButton("Browse Device")
-
-        def choose_device() -> None:
-            try:
-                folder = browse_shell_folder()
-            except Exception as exc:
-                QMessageBox.warning(wrapper, "Choose device folder", str(exc))
-                return
-            if folder:
-                line.setText(folder)
-
-        browse_device.clicked.connect(choose_device)
-        layout.addWidget(browse_device)
     wrapper.text = line.text  # type: ignore[attr-defined]
     return wrapper
 
@@ -1393,15 +1372,25 @@ def _metadata_ready(settings: AppSettings) -> bool:
 
 
 def _favorite_pixmap(pixmap: QPixmap) -> QPixmap:
-    framed = QPixmap(pixmap.size() + QSize(10, 10))
+    framed = QPixmap(pixmap.size())
     framed.fill(Qt.transparent)
     painter = QPainter(framed)
-    painter.drawPixmap(5, 5, pixmap)
+    painter.drawPixmap(0, 0, pixmap)
     pen = QPen(QColor("#ff79c6"), 5)
     painter.setPen(pen)
     painter.drawRoundedRect(2, 2, framed.width() - 4, framed.height() - 4, 8, 8)
     painter.end()
     return framed
+
+
+def _fixed_size_pixmap(pixmap: QPixmap, size: QSize) -> QPixmap:
+    canvas = QPixmap(size)
+    canvas.fill(Qt.transparent)
+    scaled = pixmap.scaled(size, Qt.KeepAspectRatio, Qt.SmoothTransformation)
+    painter = QPainter(canvas)
+    painter.drawPixmap((size.width() - scaled.width()) // 2, (size.height() - scaled.height()) // 2, scaled)
+    painter.end()
+    return canvas
 
 
 def _higher_res_image_url(url: str) -> str:

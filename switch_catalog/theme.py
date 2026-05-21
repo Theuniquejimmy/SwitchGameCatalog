@@ -15,6 +15,7 @@ QTabBar::tab {
     color: #f8f8f2;
     border: 1px solid #44475a;
     padding: 8px 14px;
+    min-width: 96px;
 }
 QTabBar::tab:selected {
     background: #0078ff;

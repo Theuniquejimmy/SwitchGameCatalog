@@ -1,4 +1,11 @@
-from switch_catalog.filename import clean_title, detect_version, extract_title_id, is_supported_game_file, title_id_family
+from switch_catalog.filename import (
+    clean_title,
+    detect_version,
+    extract_title_id,
+    is_supported_game_file,
+    is_update_or_dlc_filename,
+    title_id_family,
+)
 
 
 def test_clean_base_game_title():
@@ -27,8 +34,13 @@ def test_extract_switch_title_id_family():
     assert title_id_family(filename) == "0100AF401C8E"
 
 
-def test_nsz_is_supported_game_file(tmp_path):
-    file_path = tmp_path / "Compressed Game [0100000000000000][v0].nsz"
-    file_path.write_bytes(b"nsz")
+def test_nsz_files_are_supported(tmp_path):
+    path = tmp_path / "Example Game [0100000000000000][v0].nsz"
+    path.write_bytes(b"base")
+    assert is_supported_game_file(path)
 
-    assert is_supported_game_file(file_path)
+
+def test_update_or_dlc_detection_from_title_id_and_name():
+    assert not is_update_or_dlc_filename("Base Game [0100000000000000][v0].nsz")
+    assert is_update_or_dlc_filename("Base Game [0100000000000800][v65536].nsz")
+    assert is_update_or_dlc_filename("Base Game DLC Pack [0100000000000001][v0].nsz")

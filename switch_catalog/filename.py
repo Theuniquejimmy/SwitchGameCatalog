@@ -3,7 +3,7 @@ from __future__ import annotations
 import re
 from pathlib import Path
 
-SUPPORTED_EXTENSIONS = {".nsp", ".nsz", ".xci"}
+SUPPORTED_EXTENSIONS = {".nsp", ".xci", ".nsz"}
 
 REGION_WORDS = {
     "usa",
@@ -58,6 +58,20 @@ def extract_title_id(filename: str) -> str:
 def title_id_family(filename: str) -> str:
     title_id = extract_title_id(filename)
     return title_id[:12] if title_id else ""
+
+
+def is_update_or_dlc_filename(filename: str) -> bool:
+    lowered = Path(filename).stem.lower()
+    if re.search(r"\b(?:update|dlc)\b", lowered):
+        return True
+    title_id = extract_title_id(filename)
+    if not title_id:
+        return False
+    try:
+        value = int(title_id, 16)
+    except ValueError:
+        return False
+    return (value & 0xFFF) != 0
 
 
 def clean_title(filename: str, *, for_update: bool = False) -> str:

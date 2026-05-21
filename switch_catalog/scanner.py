@@ -14,7 +14,7 @@ except ImportError:  # pragma: no cover
         def ratio(a: str, b: str) -> float:
             return SequenceMatcher(None, a, b).ratio() * 100
 
-from .filename import clean_title, detect_version, extract_title_id, is_supported_game_file, title_id_family
+from .filename import clean_title, detect_version, is_supported_game_file, is_update_or_dlc_filename, title_id_family
 
 
 @dataclass
@@ -58,10 +58,10 @@ def scan_library(
     recursive: bool = True,
     threshold: float = 0.82,
 ) -> ScanSummary:
-    if _same_folder(base_folder, updates_folder):
+    summary = ScanSummary()
+    if not updates_folder or _same_folder(base_folder, updates_folder):
         return _scan_mixed_folder(conn, base_folder, recursive=recursive, threshold=threshold)
 
-    summary = ScanSummary()
     known_update_paths = _known_update_paths(conn)
     for path in iter_game_files(base_folder, recursive, exclude_roots=[updates_folder]):
         if str(path) in known_update_paths:
@@ -94,20 +94,19 @@ def _scan_mixed_folder(
     conn: sqlite3.Connection,
     folder: str,
     *,
-    recursive: bool = True,
-    threshold: float = 0.82,
+    recursive: bool,
+    threshold: float,
 ) -> ScanSummary:
     summary = ScanSummary()
+    paths = list(iter_game_files(folder, recursive))
+    update_paths = []
     known_update_paths = _known_update_paths(conn)
-    base_paths: list[Path] = []
-    update_paths: list[Path] = []
-    for path in iter_game_files(folder, recursive):
-        if str(path) in known_update_paths or _looks_like_update_or_dlc(path.name):
+    for path in paths:
+        if is_update_or_dlc_filename(path.name):
             update_paths.append(path)
-        else:
-            base_paths.append(path)
-
-    for path in base_paths:
+            continue
+        if str(path) in known_update_paths:
+            _remove_update_for_path(conn, path)
         summary.base_files += 1
         _upsert_base_game(conn, path)
 
@@ -132,30 +131,21 @@ def _scan_mixed_folder(
     return summary
 
 
-def _same_folder(base_folder: str, updates_folder: str) -> bool:
-    if not base_folder or not updates_folder:
+def _same_folder(first: str, second: str) -> bool:
+    if not first or not second:
         return False
     try:
-        return Path(base_folder).resolve() == Path(updates_folder).resolve()
+        return Path(first).resolve() == Path(second).resolve()
     except OSError:
-        return False
-
-
-def _looks_like_update_or_dlc(filename: str) -> bool:
-    lowered = filename.lower()
-    if "update" in lowered or "dlc" in lowered:
-        return True
-    title_id = extract_title_id(filename)
-    if not title_id:
-        return False
-    try:
-        return bool(int(title_id, 16) & 0x800)
-    except ValueError:
-        return False
+        return Path(first).expanduser() == Path(second).expanduser()
 
 
 def _known_update_paths(conn: sqlite3.Connection) -> set[str]:
     return {row["file_path"] for row in conn.execute("SELECT file_path FROM updates")}
+
+
+def _remove_update_for_path(conn: sqlite3.Connection, path: Path) -> None:
+    conn.execute("DELETE FROM updates WHERE file_path=?", (str(path),))
 
 
 def _upsert_base_game(conn: sqlite3.Connection, path: Path) -> int:
