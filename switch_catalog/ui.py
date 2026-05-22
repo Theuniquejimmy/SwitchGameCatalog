@@ -1,7 +1,11 @@
 from __future__ import annotations
 
-import sqlite3
+import base64
 import json
+import os
+import sqlite3
+import subprocess
+import time
 from pathlib import Path
 
 from . import __version__
@@ -36,7 +40,7 @@ from PySide6.QtWidgets import (
 
 from .app_updates import RELEASES_PAGE_URL, check_latest_release
 from .db import reset_library_cache, row_to_dict
-from .file_ops import delete_file_if_present, move_file_to_folder
+from .file_ops import delete_file_if_present, is_shell_path, move_file_to_folder
 from .filename import detect_version
 from .metadata import apply_metadata_result, fetch_and_apply_metadata, provider_from_settings
 from .paths import BUNDLED_ICON_PATH
@@ -531,8 +535,7 @@ class MainWindow(QMainWindow):
         ).fetchall()
         for update in update_rows:
             version = f" v{update['detected_version']}" if update["detected_version"] else ""
-            confidence = f" ({update['match_confidence']:.0%})"
-            item = QListWidgetItem(f"{update['file_name']}{version}{confidence}")
+            item = QListWidgetItem(f"{update['file_name']}{version}")
             item.setData(Qt.UserRole, update["id"])
             self.updates.addItem(item)
         self.refresh_versions()
@@ -685,6 +688,10 @@ class MainWindow(QMainWindow):
         moved = 0
         try:
             base_destination = move_file_to_folder(base_row["file_path"], self.settings.install_folder)
+            base_name, base_extension, base_modified = _installed_file_metadata(
+                base_destination,
+                base_row["file_name"],
+            )
             self.conn.execute(
                 """
                 UPDATE game_files
@@ -693,22 +700,26 @@ class MainWindow(QMainWindow):
                 """,
                 (
                     str(base_destination),
-                    base_destination.name,
-                    base_destination.suffix.lower(),
-                    base_destination.stat().st_mtime,
+                    base_name,
+                    base_extension,
+                    base_modified,
                     int(base_row["id"]),
                 ),
             )
             moved += 1
             for update in update_rows:
                 destination = move_file_to_folder(update["file_path"], self.settings.install_folder)
+                update_name, _, update_modified = _installed_file_metadata(
+                    destination,
+                    update["file_name"],
+                )
                 self.conn.execute(
                     """
                     UPDATE updates
                     SET file_path=?, file_name=?, modified_time=?
                     WHERE id=?
                     """,
-                    (str(destination), destination.name, destination.stat().st_mtime, int(update["id"])),
+                    (str(destination), update_name, update_modified, int(update["id"])),
                 )
                 moved += 1
             self.conn.commit()
@@ -718,7 +729,14 @@ class MainWindow(QMainWindow):
             return
         self.load_game(self.current_game_id)
         self.refresh_games()
-        QMessageBox.information(self, "Install complete", f"Moved {moved} file(s).")
+        if is_shell_path(self.settings.install_folder):
+            QMessageBox.information(
+                self,
+                "MTP transfer started",
+                f"Started {moved} file transfer(s). Keep the Switch connected until Windows finishes.",
+            )
+        else:
+            QMessageBox.information(self, "Install complete", f"Moved {moved} file(s).")
 
     def install_selected_updates_only(self) -> None:
         if not self.settings.install_folder:
@@ -745,13 +763,17 @@ class MainWindow(QMainWindow):
         try:
             for row in rows:
                 destination = move_file_to_folder(row["file_path"], self.settings.install_folder)
+                update_name, _, update_modified = _installed_file_metadata(
+                    destination,
+                    row["file_name"],
+                )
                 self.conn.execute(
                     """
                     UPDATE updates
                     SET file_path=?, file_name=?, modified_time=?
                     WHERE id=?
                     """,
-                    (str(destination), destination.name, destination.stat().st_mtime, int(row["id"])),
+                    (str(destination), update_name, update_modified, int(row["id"])),
                 )
                 moved += 1
             self.conn.commit()
@@ -762,7 +784,14 @@ class MainWindow(QMainWindow):
         if self.current_game_id:
             self.load_game(self.current_game_id)
         self.refresh_unmatched()
-        QMessageBox.information(self, "Install complete", f"Moved {moved} update/DLC file(s).")
+        if is_shell_path(self.settings.install_folder):
+            QMessageBox.information(
+                self,
+                "MTP transfer started",
+                f"Started {moved} update/DLC transfer(s). Keep the Switch connected until Windows finishes.",
+            )
+        else:
+            QMessageBox.information(self, "Install complete", f"Moved {moved} update/DLC file(s).")
 
     def delete_selected_updates(self) -> None:
         update_ids = self.selected_update_ids()
@@ -1313,7 +1342,7 @@ class SettingsDialog(QDialog):
         layout = QFormLayout(self)
         self.base = _folder_field(settings.base_games_folder)
         self.updates = _folder_field(settings.updates_folder)
-        self.install = _folder_field(settings.install_folder)
+        self.install = _folder_field(settings.install_folder, shell_browse=True)
         self.provider = QComboBox()
         self.provider.addItems(["igdb"])
         self.provider.setCurrentText(settings.metadata_provider)
@@ -1372,7 +1401,7 @@ class SettingsDialog(QDialog):
             parent.check_for_app_updates(silent=False)
 
 
-def _folder_field(value: str) -> QWidget:
+def _folder_field(value: str, *, shell_browse: bool = False) -> QWidget:
     wrapper = QWidget()
     layout = QHBoxLayout(wrapper)
     layout.setContentsMargins(0, 0, 0, 0)
@@ -1380,15 +1409,85 @@ def _folder_field(value: str) -> QWidget:
     browse = QPushButton("Browse")
 
     def choose() -> None:
-        folder = QFileDialog.getExistingDirectory(wrapper, "Choose folder", line.text())
+        start_folder = "" if is_shell_path(line.text()) else line.text()
+        folder = QFileDialog.getExistingDirectory(wrapper, "Choose folder", start_folder)
         if folder:
             line.setText(folder)
 
     browse.clicked.connect(choose)
     layout.addWidget(line, 1)
     layout.addWidget(browse)
+    if shell_browse:
+        browse_mtp = QPushButton("Browse MTP")
+
+        def choose_mtp() -> None:
+            folder = _choose_shell_folder(wrapper, "Choose Switch install folder")
+            if folder:
+                line.setText(folder)
+
+        browse_mtp.clicked.connect(choose_mtp)
+        layout.addWidget(browse_mtp)
     wrapper.text = line.text  # type: ignore[attr-defined]
     return wrapper
+
+
+def _choose_shell_folder(parent: QWidget, title: str) -> str:
+    script = r"""
+$ErrorActionPreference = 'Stop'
+$title = $env:SWITCH_CATALOG_MTP_PICKER_TITLE
+$shell = New-Object -ComObject Shell.Application
+$folder = $shell.BrowseForFolder(0, $title, 0x00000040, 17)
+if ($null -eq $folder) {
+    exit 2
+}
+$path = $folder.Self.Path
+if ([string]::IsNullOrWhiteSpace($path)) {
+    throw "Selected folder did not provide a Shell path."
+}
+if ($path.StartsWith("::{")) {
+    $path = "shell:$path"
+}
+[Console]::OutputEncoding = [System.Text.Encoding]::UTF8
+Write-Output $path
+"""
+    encoded_script = base64.b64encode(script.encode("utf-16le")).decode("ascii")
+    env = os.environ.copy()
+    env["SWITCH_CATALOG_MTP_PICKER_TITLE"] = title
+    try:
+        result = subprocess.run(
+            [
+                "powershell.exe",
+                "-NoProfile",
+                "-STA",
+                "-ExecutionPolicy",
+                "Bypass",
+                "-EncodedCommand",
+                encoded_script,
+            ],
+            capture_output=True,
+            text=True,
+            check=False,
+            env=env,
+            creationflags=getattr(subprocess, "CREATE_NO_WINDOW", 0),
+        )
+    except OSError as exc:
+        QMessageBox.warning(parent, "MTP folder picker", str(exc))
+        return ""
+    if result.returncode == 2:
+        return ""
+    if result.returncode != 0:
+        message = (result.stderr or result.stdout).strip()
+        QMessageBox.warning(parent, "MTP folder picker", message or "Could not open the Windows Shell folder picker.")
+        return ""
+    output = result.stdout.strip()
+    return output.splitlines()[-1] if output else ""
+
+
+def _installed_file_metadata(destination: Path | str, original_name: str) -> tuple[str, str, float]:
+    if isinstance(destination, Path):
+        return destination.name, destination.suffix.lower(), destination.stat().st_mtime
+    name = original_name or str(destination).rsplit("\\", 1)[-1]
+    return name, Path(name).suffix.lower(), time.time()
 
 
 def _metadata_ready(settings: AppSettings) -> bool:

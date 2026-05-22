@@ -1,3 +1,4 @@
+from switch_catalog import file_ops
 from switch_catalog.file_ops import move_file_to_folder, unique_destination
 
 
@@ -31,3 +32,20 @@ def test_move_file_to_same_folder_is_noop(tmp_path):
 
     assert moved == source
     assert source.read_text(encoding="utf-8") == "same"
+
+
+def test_move_file_to_shell_folder_starts_mtp_copy_without_blocking(tmp_path, monkeypatch):
+    source = tmp_path / "Game.nsp"
+    source.write_text("mtp", encoding="utf-8")
+    calls = []
+
+    def fake_copy(path, folder, timeout_seconds=1800):
+        calls.append((path, folder, timeout_seconds))
+
+    monkeypatch.setattr(file_ops, "_copy_to_shell_folder", fake_copy)
+
+    moved = move_file_to_folder(source, "shell:::{device}")
+
+    assert moved == "shell:::{device}\\Game.nsp"
+    assert calls == [(source, "shell:::{device}", 1800)]
+    assert source.exists()

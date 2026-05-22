@@ -44,4 +44,9 @@ def save_settings(settings: AppSettings) -> None:
 def normalize_folder(value: str) -> str:
     if not value:
         return ""
+    value = value.strip()
+    if value.lower().startswith("shell:::"):
+        return value
+    if value.startswith("::{"):
+        return f"shell:{value}"
     return str(Path(value).expanduser())
