@@ -87,6 +87,17 @@ def init_db(conn: sqlite3.Connection) -> None:
     conn.commit()
 
 
+def reset_library_cache(conn: sqlite3.Connection) -> None:
+    conn.execute("DELETE FROM updates")
+    conn.execute("DELETE FROM screenshots")
+    conn.execute("DELETE FROM game_files")
+    conn.execute("DELETE FROM games")
+    conn.execute(
+        "DELETE FROM sqlite_sequence WHERE name IN ('updates', 'screenshots', 'game_files', 'games')"
+    )
+    conn.commit()
+
+
 def _ensure_column(conn: sqlite3.Connection, table: str, column: str, definition: str) -> None:
     existing = {row["name"] for row in conn.execute(f"PRAGMA table_info({table})")}
     if column not in existing:

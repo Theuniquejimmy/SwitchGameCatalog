@@ -27,6 +27,16 @@ def load_versions(*, refresh: bool = False) -> dict[str, dict[str, str]]:
     return _merge_versions(versions, txt_versions)
 
 
+def refresh_versions_if_stale(versions: dict[str, dict[str, str]]) -> dict[str, dict[str, str]]:
+    if versions_cache_is_stale():
+        return load_versions()
+    return versions
+
+
+def versions_cache_is_stale() -> bool:
+    return _cache_is_stale(VERSIONS_CACHE_PATH) or _cache_is_stale(VERSIONS_TXT_CACHE_PATH)
+
+
 def _load_json_versions(*, refresh: bool = False) -> dict[str, dict[str, str]]:
     if refresh or _cache_is_stale(VERSIONS_CACHE_PATH):
         try:

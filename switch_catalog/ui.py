@@ -35,14 +35,14 @@ from PySide6.QtWidgets import (
 )
 
 from .app_updates import RELEASES_PAGE_URL, check_latest_release
-from .db import row_to_dict
+from .db import reset_library_cache, row_to_dict
 from .file_ops import delete_file_if_present, move_file_to_folder
 from .filename import detect_version
 from .metadata import apply_metadata_result, fetch_and_apply_metadata, provider_from_settings
 from .paths import BUNDLED_ICON_PATH
 from .scanner import scan_library
 from .settings import AppSettings, normalize_folder, save_settings
-from .versions import load_versions, update_status
+from .versions import load_versions, refresh_versions_if_stale, update_status
 
 
 class MainWindow(QMainWindow):
@@ -92,23 +92,25 @@ class MainWindow(QMainWindow):
         self.search.textChanged.connect(self.refresh_games)
         self.genre_filter = QComboBox()
         self.genre_filter.currentTextChanged.connect(self.refresh_games)
-        self.missing_only = QCheckBox("Needs review")
+        filters = QVBoxLayout()
+        self.missing_only = QCheckBox("Need Review")
         self.missing_only.stateChanged.connect(self.refresh_games)
+        self.updates_only = QCheckBox("Needs Update?")
+        self.updates_only.stateChanged.connect(self.refresh_games)
+        filters.addWidget(self.missing_only)
+        filters.addWidget(self.updates_only)
         toolbar.addWidget(self.search, 3)
         toolbar.addWidget(self.genre_filter, 1)
-        toolbar.addWidget(self.missing_only)
+        toolbar.addLayout(filters)
 
         buttons = QHBoxLayout()
-        scan_btn = QPushButton("Rescan")
+        scan_btn = QPushButton("Rescan Library")
         scan_btn.clicked.connect(self.scan)
         settings_btn = QPushButton("Settings")
         settings_btn.clicked.connect(self.open_settings)
-        refresh_metadata_btn = QPushButton("Refresh Metadata")
-        refresh_metadata_btn.clicked.connect(self.refresh_metadata)
         refresh_all_metadata_btn = QPushButton("Scan All Metadata")
         refresh_all_metadata_btn.clicked.connect(self.refresh_all_metadata)
         buttons.addWidget(scan_btn)
-        buttons.addWidget(refresh_metadata_btn)
         buttons.addWidget(refresh_all_metadata_btn)
         buttons.addWidget(settings_btn)
 
@@ -267,8 +269,14 @@ class MainWindow(QMainWindow):
             query += " AND (g.metadata_provider IS NULL OR g.needs_review=1)"
         query += " GROUP BY g.id ORDER BY g.display_title COLLATE NOCASE"
 
+        updates_only = hasattr(self, "updates_only") and self.updates_only.isChecked()
+        if updates_only:
+            self.refresh_versions()
+
         self.games_list.clear()
         for row in self.conn.execute(query, args):
+            if updates_only and not self.game_needs_update(int(row["id"]), row["file_path"]):
+                continue
             text = f"♥ {row['display_title']}" if row["favorite"] else row["display_title"]
             item = QListWidgetItem(text)
             if row["favorite"]:
@@ -279,6 +287,21 @@ class MainWindow(QMainWindow):
             self.games_list.addItem(item)
             if selected == row["id"]:
                 self.games_list.setCurrentItem(item)
+
+    def refresh_versions(self) -> None:
+        self.versions = refresh_versions_if_stale(self.versions)
+
+    def game_needs_update(self, game_id: int, base_file_path: str | None) -> bool:
+        update_rows = self.conn.execute(
+            "SELECT file_name FROM updates WHERE game_id=?",
+            (game_id,),
+        ).fetchall()
+        _, newer_versions = update_status(
+            Path(base_file_path or "").name,
+            [row["file_name"] for row in update_rows],
+            self.versions,
+        )
+        return bool(newer_versions)
 
     def refresh_grid(self) -> None:
         if not hasattr(self, "grid_list"):
@@ -384,6 +407,8 @@ class MainWindow(QMainWindow):
                 self.genre_filter.setCurrentIndex(index)
         if hasattr(self, "missing_only"):
             self.missing_only.setChecked(False)
+        if hasattr(self, "updates_only"):
+            self.updates_only.setChecked(False)
         self.refresh_games()
         for index in range(self.games_list.count()):
             item = self.games_list.item(index)
@@ -428,7 +453,6 @@ class MainWindow(QMainWindow):
         QApplication.processEvents()
         menu = QMenu(self)
         search_action = menu.addAction("Search/change metadata match")
-        refresh_action = menu.addAction("Refresh best metadata match")
         favorite = self.is_favorite(int(item.data(Qt.UserRole)))
         favorite_action = menu.addAction("Remove favorite" if favorite else "Favorite game")
         mark_dlc_action = menu.addAction("Mark as DLC/update")
@@ -436,8 +460,6 @@ class MainWindow(QMainWindow):
         chosen = menu.exec(self.games_list.mapToGlobal(position))
         if chosen == search_action:
             self.search_metadata_match(int(item.data(Qt.UserRole)))
-        elif chosen == refresh_action:
-            self.refresh_metadata()
         elif chosen == favorite_action:
             self.toggle_favorite(int(item.data(Qt.UserRole)))
         elif chosen == mark_dlc_action:
@@ -513,6 +535,7 @@ class MainWindow(QMainWindow):
             item = QListWidgetItem(f"{update['file_name']}{version}{confidence}")
             item.setData(Qt.UserRole, update["id"])
             self.updates.addItem(item)
+        self.refresh_versions()
         status, newer_versions = update_status(
             Path(game.get("file_path") or "").name,
             [row["file_name"] for row in update_rows],
@@ -922,6 +945,7 @@ class MainWindow(QMainWindow):
             self.open_settings()
             if not self.settings.base_games_folder:
                 return
+        reset_library_cache(self.conn)
         summary = scan_library(
             self.conn,
             self.settings.base_games_folder,

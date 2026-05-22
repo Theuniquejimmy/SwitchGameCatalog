@@ -1,6 +1,6 @@
 import sqlite3
 
-from switch_catalog.db import init_db
+from switch_catalog.db import init_db, reset_library_cache
 from switch_catalog.scanner import _match_update_by_title_id, _title_match_score, scan_library
 
 
@@ -91,3 +91,29 @@ def test_scan_mixed_folder_promotes_existing_base_nsz_from_updates(tmp_path):
     assert summary.base_files == 1
     assert conn.execute("SELECT COUNT(*) FROM games").fetchone()[0] == 1
     assert conn.execute("SELECT COUNT(*) FROM updates").fetchone()[0] == 0
+
+
+def test_rescan_from_scratch_removes_stale_library_rows(tmp_path):
+    base = tmp_path / "base"
+    updates = tmp_path / "updates"
+    base.mkdir()
+    updates.mkdir()
+    old_file = base / "Old Game [0100000000000000][v0].nsp"
+    old_file.write_bytes(b"old")
+    conn = sqlite3.connect(":memory:")
+    conn.row_factory = sqlite3.Row
+    init_db(conn)
+    scan_library(conn, str(base), str(updates))
+    old_file.unlink()
+    new_file = base / "New Game [0100000000001000][v0].nsp"
+    new_file.write_bytes(b"new")
+
+    reset_library_cache(conn)
+    summary = scan_library(conn, str(base), str(updates))
+
+    names = [
+        row["display_title"]
+        for row in conn.execute("SELECT display_title FROM games ORDER BY display_title")
+    ]
+    assert summary.base_files == 1
+    assert names == ["New Game"]
