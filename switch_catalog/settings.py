@@ -12,6 +12,10 @@ class AppSettings:
     base_games_folder: str = ""
     updates_folder: str = ""
     install_folder: str = ""
+    http_server_enabled: bool = False
+    http_server_port: int = 8000
+    http_server_username: str = ""
+    http_server_password: str = ""
     metadata_provider: str = "igdb"
     igdb_client_id: str = ""
     igdb_client_secret: str = ""

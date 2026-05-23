@@ -31,6 +31,7 @@ from PySide6.QtWidgets import (
     QProgressDialog,
     QPushButton,
     QSlider,
+    QSpinBox,
     QSplitter,
     QTabWidget,
     QTextEdit,
@@ -42,6 +43,7 @@ from .app_updates import RELEASES_PAGE_URL, check_latest_release
 from .db import reset_library_cache, row_to_dict
 from .file_ops import delete_file_if_present, is_shell_path, move_file_to_folder
 from .filename import detect_version
+from .http_server import CatalogHttpServer, switch_directory_url
 from .metadata import apply_metadata_result, fetch_and_apply_metadata, provider_from_settings
 from .paths import BUNDLED_ICON_PATH
 from .scanner import scan_library
@@ -59,6 +61,7 @@ class MainWindow(QMainWindow):
         self.pixmap_cache: dict[str, QPixmap] = {}
         self.context_highlighted_item: QListWidgetItem | None = None
         self.versions = load_versions()
+        self.catalog_server = CatalogHttpServer()
 
         self.setWindowTitle("Switch Game Catalog")
         self.setWindowIcon(QIcon(str(BUNDLED_ICON_PATH)))
@@ -69,6 +72,7 @@ class MainWindow(QMainWindow):
             self.scan()
         if self.settings.auto_check_updates_on_startup:
             QTimer.singleShot(1000, lambda: self.check_for_app_updates(silent=True))
+        self._sync_http_server(show_errors=False)
 
     def _build_ui(self) -> None:
         self.tabs = QTabWidget()
@@ -1096,7 +1100,28 @@ class MainWindow(QMainWindow):
         if dialog.exec() == QDialog.Accepted:
             self.settings = dialog.settings
             save_settings(self.settings)
+            self._sync_http_server(show_errors=True)
             self.refresh_match_games()
+
+    def _sync_http_server(self, *, show_errors: bool) -> None:
+        if not self.settings.http_server_enabled:
+            self.catalog_server.stop()
+            self.statusBar().showMessage("Catalog HTTP server stopped", 4000)
+            return
+        try:
+            self.catalog_server.start(self.settings)
+        except OSError as exc:
+            self.catalog_server.stop()
+            message = f"Could not start catalog HTTP server on port {self.settings.http_server_port}: {exc}"
+            if show_errors:
+                QMessageBox.warning(self, "HTTP server", message)
+            self.statusBar().showMessage(message, 8000)
+            return
+        self.statusBar().showMessage(f"Catalog HTTP server running at {switch_directory_url(self.catalog_server.port)}", 8000)
+
+    def closeEvent(self, event) -> None:
+        self.catalog_server.stop()
+        super().closeEvent(event)
 
     def check_for_app_updates(self, *, silent: bool = False) -> None:
         try:
@@ -1355,6 +1380,18 @@ class SettingsDialog(QDialog):
         self.auto.setChecked(settings.auto_rescan_on_startup)
         self.auto_check_updates = QCheckBox()
         self.auto_check_updates.setChecked(settings.auto_check_updates_on_startup)
+        self.http_enabled = QCheckBox()
+        self.http_enabled.setChecked(settings.http_server_enabled)
+        self.http_port = QSpinBox()
+        self.http_port.setRange(1, 65535)
+        self.http_port.setValue(int(settings.http_server_port or 8000))
+        self.http_username = QLineEdit(settings.http_server_username)
+        self.http_password = QLineEdit(settings.http_server_password)
+        self.http_password.setEchoMode(QLineEdit.Password)
+        self.http_url = QLabel()
+        self.http_url.setTextInteractionFlags(Qt.TextSelectableByMouse | Qt.TextSelectableByKeyboard)
+        self.http_port.valueChanged.connect(self.update_http_url)
+        self.update_http_url()
         update_controls = QHBoxLayout()
         check_updates = QPushButton("Check for Updates")
         check_updates.clicked.connect(self.check_for_updates)
@@ -1369,6 +1406,11 @@ class SettingsDialog(QDialog):
         layout.addRow("IGDB client secret", self.igdb_client_secret)
         layout.addRow("Scan recursively", self.recursive)
         layout.addRow("Auto-rescan on startup", self.auto)
+        layout.addRow("Enable HTTP server", self.http_enabled)
+        layout.addRow("HTTP port", self.http_port)
+        layout.addRow("HTTP username", self.http_username)
+        layout.addRow("HTTP password", self.http_password)
+        layout.addRow("Switch URL", self.http_url)
         layout.addRow("App updates", update_controls)
         actions = QHBoxLayout()
         save = QPushButton("Save")
@@ -1393,7 +1435,14 @@ class SettingsDialog(QDialog):
         self.settings.scan_recursively = self.recursive.isChecked()
         self.settings.auto_rescan_on_startup = self.auto.isChecked()
         self.settings.auto_check_updates_on_startup = self.auto_check_updates.isChecked()
+        self.settings.http_server_enabled = self.http_enabled.isChecked()
+        self.settings.http_server_port = int(self.http_port.value())
+        self.settings.http_server_username = self.http_username.text().strip()
+        self.settings.http_server_password = self.http_password.text()
         super().accept()
+
+    def update_http_url(self) -> None:
+        self.http_url.setText(switch_directory_url(int(self.http_port.value())))
 
     def check_for_updates(self) -> None:
         parent = self.parent()
