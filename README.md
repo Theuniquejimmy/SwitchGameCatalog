@@ -53,6 +53,16 @@ http://192.168.1.213:8000/dir/
 
 Use the `/dir/` URL as DBI's Apache-style HTTP directory source. Downloads support HTTP range requests, so interrupted transfers can resume when the installer supports it.
 
+For best stability, launch DBI in full-RAM/application mode. To do this, hold R while opening an installed game, then start DBI from the Homebrew Menu. Heavy installers are more likely to crash if DBI is launched from the Album in applet mode.
+
+Also make sure you’re using a DBI version that matches your Switch firmware. Older DBI builds can crash or behave unpredictably on newer firmware versions.
+
+Accessing your catalog from outside your home network
+
+Basic Auth over plain HTTP is acceptable on a trusted local network, but the username and password are not encrypted. Because of that, you should not port-forward the catalog directly to the public internet.
+
+For secure access from anywhere, use a private VPN-style network such as Tailscale or WireGuard. Install it on both your PC and your phone or laptop, then open the catalog using the PC’s Tailscale/WireGuard IP address. This keeps the connection encrypted, avoids exposing any ports publicly, and your password protection still remains in place.
+
 
 ## Project Structure
 
