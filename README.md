@@ -24,6 +24,7 @@ A local Windows desktop catalog for personal Nintendo Switch game files. It scan
 - Details view compares local update versions against the cached titledb `versions.json` latest release data
 - Titledb version lists refresh automatically when the cached files are older than 24 hours
 - Right-click deletion for duplicate game files and old update/DLC files
+- Optional built-in HTTP server for installing cataloged files over Wi-Fi with DBI
 
 ## Setup
 
@@ -39,6 +40,19 @@ python main.py
 Open **Settings**, choose a base games folder and updates folder, then run **Rescan**.
 
 IGDB metadata requires a Twitch/IGDB client ID and client secret. Without API credentials, scanning and cataloging still work.
+
+## DBI Wi-Fi Install
+
+The app can run a small built-in HTTP server that exposes only files already present in your catalog. Open **Settings**, enable **HTTP server**, choose a port if needed, and optionally set a username and password. The default port is `8000`.
+
+Settings shows the exact URL to enter in DBI. It will look like:
+
+```text
+http://192.168.1.213:8000/dir/
+```
+
+Use the `/dir/` URL as DBI's Apache-style HTTP directory source. Downloads support HTTP range requests, so interrupted transfers can resume when the installer supports it.
+
 
 ## Project Structure
 
