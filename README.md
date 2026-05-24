@@ -8,7 +8,6 @@ A local Windows desktop catalog for personal Nintendo Switch game files. It scan
 ## Features
 
 - Recursive base-game scan for `.nsp`, `.nsz`, and `.xci`
-- Separate recursive updates-folder scan
 - Fuzzy update-to-game matching
 - SQLite catalog at `~/.switch_library_catalog/library.sqlite3`
 - Settings stored at `~/.switch_library_catalog/settings.json`
@@ -17,7 +16,7 @@ A local Windows desktop catalog for personal Nintendo Switch game files. It scan
 - Right-click option to move a mistaken game entry into Unmatched Updates for DLC/update matching
 - Larger screenshot browser with Previous/Next controls
 - Unmatched updates view
-- Optional IGDB metadata lookup for real cover art
+- Optional IGDB metadata lookup for real cover art and trailers
 - Manual metadata rematching from the game list right-click menu
 - Install button that moves the base game first, then selected updates/DLC, into a configured install folder
 - Right-click install for selected update/DLC files when the base game is already installed
