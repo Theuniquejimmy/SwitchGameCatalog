@@ -13,6 +13,7 @@ import requests
 from .db import get_cache, upsert_cache
 
 MIN_AUTO_MATCH_CONFIDENCE = 0.86
+IGDB_SEARCH_CACHE_VERSION = "v2"
 
 
 @dataclass
@@ -26,6 +27,7 @@ class MetadataResult:
     publisher: str = ""
     genres: list[str] | None = None
     cover_image_url: str = ""
+    trailer_url: str = ""
     screenshots: list[str] | None = None
     confidence: float = 0.0
 
@@ -59,14 +61,14 @@ class IgdbProvider:
         restrict_to_switch: bool,
         seen: set[str],
     ) -> list[MetadataResult]:
-        cache_key = f"search:{'switch' if restrict_to_switch else 'all'}:{query}"
+        cache_key = f"search:{IGDB_SEARCH_CACHE_VERSION}:{'switch' if restrict_to_switch else 'all'}:{query}"
         cached = get_cache(conn, self.name, cache_key)
         if cached is None:
             where = "where platforms = (130); " if restrict_to_switch else ""
             body = (
                 'search "{query}"; '
                 "fields name,summary,first_release_date,"
-                "cover.url,screenshots.url,genres.name,"
+                "cover.url,screenshots.url,genres.name,videos.video_id,"
                 "involved_companies.developer,involved_companies.publisher,involved_companies.company.name; "
                 "{where}limit 10;"
             ).format(query=_escape_igdb_query(query), where=where)
@@ -121,6 +123,7 @@ class IgdbProvider:
             publisher=", ".join(publishers),
             genres=[genre.get("name", "") for genre in item.get("genres", []) or [] if genre.get("name")],
             cover_image_url=_igdb_image_url((item.get("cover") or {}).get("url", ""), "t_cover_big_2x"),
+            trailer_url=_igdb_trailer_url(item.get("videos", []) or []),
             screenshots=screenshots,
             confidence=_title_similarity(name, query),
         )
@@ -162,6 +165,14 @@ def _igdb_image_url(url: str, size: str) -> str:
     if url.startswith("http://"):
         return "https://" + url.removeprefix("http://")
     return url
+
+
+def _igdb_trailer_url(videos: list[dict[str, Any]]) -> str:
+    for video in videos:
+        video_id = str(video.get("video_id") or "").strip()
+        if video_id:
+            return f"https://www.youtube.com/watch?v={video_id}"
+    return ""
 
 
 def metadata_search_queries(title: str) -> list[str]:
@@ -283,6 +294,7 @@ def apply_metadata_result(
             publisher=?,
             genres=?,
             cover_image_url=?,
+            trailer_url=?,
             needs_review=?,
             metadata_locked=CASE WHEN ? THEN 1 ELSE metadata_locked END
         WHERE id=?
@@ -297,6 +309,7 @@ def apply_metadata_result(
             result.publisher,
             json.dumps(result.genres or []),
             result.cover_image_url,
+            result.trailer_url,
             1 if needs_review else 0,
             1 if lock else 0,
             game_id,
@@ -322,7 +335,7 @@ def fetch_missing_metadata(
 ) -> tuple[int, int]:
     query = "SELECT id, display_title, cleaned_title FROM games WHERE metadata_locked=0"
     if not force:
-        query += " AND (metadata_provider IS NULL OR description IS NULL OR description='')"
+        query += " AND (metadata_provider IS NULL OR description IS NULL OR description='' OR trailer_url IS NULL)"
     query += " ORDER BY display_title COLLATE NOCASE"
     if limit:
         query += f" LIMIT {int(limit)}"

@@ -32,6 +32,7 @@ def init_db(conn: sqlite3.Connection) -> None:
             genres TEXT,
             cover_image_path TEXT,
             cover_image_url TEXT,
+            trailer_url TEXT,
             date_added TEXT NOT NULL DEFAULT CURRENT_TIMESTAMP,
             last_scanned TEXT NOT NULL DEFAULT CURRENT_TIMESTAMP,
             metadata_locked INTEGER NOT NULL DEFAULT 0,
@@ -63,6 +64,24 @@ def init_db(conn: sqlite3.Connection) -> None:
             manual_match INTEGER NOT NULL DEFAULT 0
         );
 
+        CREATE TABLE IF NOT EXISTS install_jobs (
+            id INTEGER PRIMARY KEY AUTOINCREMENT,
+            game_id INTEGER REFERENCES games(id) ON DELETE SET NULL,
+            source_path TEXT NOT NULL,
+            destination_path TEXT,
+            destination_folder TEXT NOT NULL,
+            destination_label TEXT,
+            file_name TEXT NOT NULL,
+            file_size INTEGER NOT NULL DEFAULT 0,
+            file_kind TEXT NOT NULL,
+            detected_version TEXT,
+            raw_version INTEGER NOT NULL DEFAULT 0,
+            status TEXT NOT NULL,
+            error TEXT,
+            created_at TEXT NOT NULL DEFAULT CURRENT_TIMESTAMP,
+            completed_at TEXT
+        );
+
         CREATE TABLE IF NOT EXISTS screenshots (
             id INTEGER PRIMARY KEY AUTOINCREMENT,
             game_id INTEGER NOT NULL REFERENCES games(id) ON DELETE CASCADE,
@@ -84,16 +103,18 @@ def init_db(conn: sqlite3.Connection) -> None:
     )
     _ensure_column(conn, "updates", "manual_match", "INTEGER NOT NULL DEFAULT 0")
     _ensure_column(conn, "games", "favorite", "INTEGER NOT NULL DEFAULT 0")
+    _ensure_column(conn, "games", "trailer_url", "TEXT")
     conn.commit()
 
 
 def reset_library_cache(conn: sqlite3.Connection) -> None:
+    conn.execute("DELETE FROM install_jobs")
     conn.execute("DELETE FROM updates")
     conn.execute("DELETE FROM screenshots")
     conn.execute("DELETE FROM game_files")
     conn.execute("DELETE FROM games")
     conn.execute(
-        "DELETE FROM sqlite_sequence WHERE name IN ('updates', 'screenshots', 'game_files', 'games')"
+        "DELETE FROM sqlite_sequence WHERE name IN ('install_jobs', 'updates', 'screenshots', 'game_files', 'games')"
     )
     conn.commit()
 

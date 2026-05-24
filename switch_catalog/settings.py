@@ -12,6 +12,8 @@ class AppSettings:
     base_games_folder: str = ""
     updates_folder: str = ""
     install_folder: str = ""
+    install_folder_label: str = ""
+    install_destination: str = "local"
     http_server_enabled: bool = False
     http_server_port: int = 8000
     http_server_username: str = ""
@@ -37,6 +39,10 @@ def load_settings() -> AppSettings:
     allowed = AppSettings.__dataclass_fields__.keys()
     settings = AppSettings(**{key: value for key, value in data.items() if key in allowed})
     settings.metadata_provider = "igdb"
+    if settings.install_destination not in {"local", "nand", "sd"}:
+        settings.install_destination = "local"
+    if "install_destination" not in data and _looks_like_shell_path(settings.install_folder):
+        settings.install_destination = _infer_install_destination(settings.install_folder_label)
     return settings
 
 
@@ -54,3 +60,17 @@ def normalize_folder(value: str) -> str:
     if value.startswith("::{"):
         return f"shell:{value}"
     return str(Path(value).expanduser())
+
+
+def _looks_like_shell_path(value: str) -> bool:
+    text = (value or "").strip().lower()
+    return text.startswith("shell:::") or text.startswith("::{")
+
+
+def _infer_install_destination(label: str) -> str:
+    lowered = (label or "").casefold()
+    if "nand" in lowered:
+        return "nand"
+    if "sd" in lowered:
+        return "sd"
+    return "local"

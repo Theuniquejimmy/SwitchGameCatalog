@@ -7,12 +7,27 @@ from switch_catalog.versions import (
     latest_for_title,
     parse_versions_txt,
     refresh_versions_if_stale,
+    released_version_label,
     update_status,
+    version_label,
 )
 
 
 def test_short_local_version_maps_to_raw_switch_version():
     assert file_version_number("Example [0100000000000800][v6].nsp") == 393216
+
+
+def test_dotted_local_version_maps_to_raw_switch_scale():
+    assert file_version_number("Example Update v1.3.0.nsp") == 66304
+    assert file_version_number("Example Update v3.0.1.nsp") == 196609
+
+
+def test_version_label_includes_dotted_switch_version():
+    assert version_label(196608) == "v196608 (3.0.0)"
+
+
+def test_released_version_label_omits_empty_release_date_parentheses():
+    assert released_version_label(196608, "") == "v196608 (3.0.0)"
 
 
 def test_update_status_lists_newer_versions():
@@ -30,8 +45,89 @@ def test_update_status_lists_newer_versions():
         versions,
     )
 
-    assert "Latest: v196608" in status
+    assert "Latest Version on File: v131072 (2.0.0)" in status
+    assert "Latest Version Released: v196608 (3.0.0)" in status
     assert [(item.version, item.release_date) for item in newer] == [(196608, "2020-03-01")]
+
+
+def test_update_status_does_not_flag_dotted_update_newer_than_raw_latest():
+    versions = {"0100000000000000": {"65536": "2020-01-01"}}
+
+    status, newer = update_status(
+        "Example [0100000000000000][v0].nsp",
+        ["Example Update v1.3.0.nsp"],
+        versions,
+    )
+
+    assert status == (
+        "Latest Version on File: v66304 (1.3.0)\n"
+        "Latest Version Released: v65536 (1.0.0) (2020-01-01)"
+    )
+    assert newer == []
+
+
+def test_update_status_does_not_flag_matching_dotted_update_as_needing_update():
+    versions = {"0100000000000000": {"196608": "2020-03-01"}}
+
+    status, newer = update_status(
+        "Example [0100000000000000][v0].nsp",
+        ["Example Update v3.0.0.nsp"],
+        versions,
+    )
+
+    assert status == (
+        "Latest Version on File: v196608 (3.0.0)\n"
+        "Latest Version Released: v196608 (3.0.0) (2020-03-01)"
+    )
+    assert newer == []
+
+
+def test_update_status_still_compares_raw_switch_versions():
+    versions = {"0100000000000000": {"65536": "2020-01-01", "131072": "2020-02-01"}}
+
+    status, newer = update_status(
+        "Example [0100000000000000][v0].nsp",
+        ["Example Update v65536.nsp"],
+        versions,
+    )
+
+    assert "Latest Version on File: v65536 (1.0.0)" in status
+    assert "Latest Version Released: v131072 (2.0.0)" in status
+    assert [(item.version, item.release_date) for item in newer] == [(131072, "2020-02-01")]
+
+
+def test_update_status_lists_newer_versions_latest_first():
+    versions = {
+        "0100000000000000": {
+            "65536": "2020-01-01",
+            "131072": "2020-02-01",
+            "196608": "2020-03-01",
+        }
+    }
+
+    _, newer = update_status(
+        "Example [0100000000000000][v0].nsp",
+        ["Example Update v65536.nsp"],
+        versions,
+    )
+
+    assert [item.version for item in newer] == [196608, 131072]
+
+
+def test_update_status_omits_empty_latest_release_date_parentheses():
+    versions = {"0100000000000000": {"196608": ""}}
+
+    status, newer = update_status(
+        "Example [0100000000000000][v0].nsp",
+        ["Example Update v3.0.0.nsp"],
+        versions,
+    )
+
+    assert status == (
+        "Latest Version on File: v196608 (3.0.0)\n"
+        "Latest Version Released: v196608 (3.0.0)"
+    )
+    assert newer == []
 
 
 def test_latest_for_title_unknown_when_missing():

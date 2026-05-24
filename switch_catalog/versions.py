@@ -20,6 +20,26 @@ class VersionInfo:
     release_date: str
 
 
+def version_label(version: int | str) -> str:
+    try:
+        value = int(version)
+    except (TypeError, ValueError):
+        return str(version)
+    return f"v{value} ({raw_version_to_dotted(value)})"
+
+
+def released_version_label(version: int, release_date: str = "") -> str:
+    label = version_label(version)
+    return f"{label} ({release_date})" if release_date else label
+
+
+def raw_version_to_dotted(version: int) -> str:
+    major = version // 65536
+    minor = (version % 65536) // 256
+    patch = version % 256
+    return f"{major}.{minor}.{patch}"
+
+
 def load_versions(*, refresh: bool = False) -> dict[str, dict[str, str]]:
     ensure_app_dirs()
     versions = _load_json_versions(refresh=refresh)
@@ -111,8 +131,13 @@ def latest_for_title(versions: dict[str, dict[str, str]], title_id: str) -> Vers
 
 def file_version_number(filename: str) -> int:
     detected = detect_version(filename)
-    if not detected or "." in detected:
+    if not detected:
         return 0
+    if "." in detected:
+        parts = [int(part) for part in detected.split(".")]
+        parts.extend([0] * (3 - len(parts)))
+        major, minor, patch = parts[:3]
+        return (major * 65536) + (minor * 256) + patch
     value = int(detected)
     if value and value < 65536:
         return value * 65536
@@ -121,17 +146,19 @@ def file_version_number(filename: str) -> int:
 
 def update_status(base_filename: str, update_filenames: list[str], versions: dict[str, dict[str, str]]) -> tuple[str, list[VersionInfo]]:
     title_id = extract_title_id(base_filename)
-    latest = latest_for_title(versions, title_id)
-    if latest is None:
-        return "Latest version: unknown", []
-
     local_versions = [file_version_number(base_filename)]
     local_versions.extend(file_version_number(filename) for filename in update_filenames)
     current = max(local_versions or [0])
+    on_file = f"Latest Version on File: {version_label(current or 0)}"
+    latest = latest_for_title(versions, title_id)
+    if latest is None:
+        return f"{on_file}\nLatest Version Released: unknown", []
+
     available = _newer_versions(versions, title_id, current)
-    if not available:
-        return f"Latest version installed: v{latest.version} ({latest.release_date})", []
-    status = f"Installed version: v{current or 0}. Latest: v{latest.version} ({latest.release_date})"
+    status = (
+        f"{on_file}\n"
+        f"Latest Version Released: {released_version_label(latest.version, latest.release_date)}"
+    )
     return status, available
 
 
@@ -139,7 +166,7 @@ def _newer_versions(versions: dict[str, dict[str, str]], title_id: str, current:
     records = versions.get(title_id.upper()) or {}
     return [
         VersionInfo(int(version), release_date)
-        for version, release_date in sorted(records.items(), key=lambda item: int(item[0]))
+        for version, release_date in sorted(records.items(), key=lambda item: int(item[0]), reverse=True)
         if int(version) > current
     ]
 
