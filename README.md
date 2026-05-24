@@ -1,6 +1,6 @@
 # Switch Game Catalog
 
-A local Windows desktop catalog for personal Nintendo Switch game files. It scans user-selected `.nsp`, `.nsz`, and `.xci` folders, stores records in SQLite, matches update files from a separate updates folder, and displays the collection in a two-pane library interface.
+A local Windows desktop catalog for personal Nintendo Switch game files. It scans user-selected `.nsp`, `.nsz`, and `.xci` folders, stores records in SQLite, matches update files from a separate updates folder, and displays the collection in a two-pane library interface. Let's you also install games wired and wirelessly through DBI.
 
 <img width="2560" height="1390" alt="image" src="https://github.com/user-attachments/assets/8d5eeac6-0ef0-4e85-aa37-c6a1e8628962" />
 <img width="2560" height="1390" alt="image" src="https://github.com/user-attachments/assets/0bc17ebb-97d3-4332-b305-c76c36747506" />
@@ -24,7 +24,7 @@ A local Windows desktop catalog for personal Nintendo Switch game files. It scan
 - Details view compares local update versions against the cached titledb `versions.json` latest release data
 - Titledb version lists refresh automatically when the cached files are older than 24 hours
 - Right-click deletion for duplicate game files and old update/DLC files
-- Optional built-in HTTP server for installing cataloged files over Wi-Fi with DBI
+- Built-in HTTP server for installing cataloged games and updates over Wi-Fi with DBI
 
 ## Setup
 
